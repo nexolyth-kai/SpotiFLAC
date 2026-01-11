@@ -2,11 +2,13 @@ package backend
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -28,8 +30,35 @@ type SpotifyMetadataClient struct {
 }
 
 func NewSpotifyMetadataClient() *SpotifyMetadataClient {
+	// Custom TLS configuration with increased timeouts
+	tlsConfig := &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: false, // Keep certificate verification enabled for security
+	}
+
+	// Custom dialer with increased timeouts
+	dialer := &net.Dialer{
+		Timeout:   60 * time.Second, // Connection timeout
+		KeepAlive: 60 * time.Second,
+	}
+
+	// Custom transport with TLS and dialer configuration
+	transport := &http.Transport{
+		TLSClientConfig:       tlsConfig,
+		DialContext:           dialer.DialContext,
+		TLSHandshakeTimeout:   30 * time.Second, // Increased from default 10s
+		ResponseHeaderTimeout: 30 * time.Second,
+		ExpectContinueTimeout: 5 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   10,
+	}
+
 	return &SpotifyMetadataClient{
-		httpClient: &http.Client{Timeout: 30 * time.Second},
+		httpClient: &http.Client{
+			Timeout:   90 * time.Second, // Overall request timeout (increased from 30s)
+			Transport: transport,
+		},
 	}
 }
 
@@ -693,32 +722,44 @@ func (c *SpotifyMetadataClient) formatArtistDiscographyData(ctx context.Context,
 func (c *SpotifyMetadataClient) getJSON(ctx context.Context, endpoint string, dst interface{}) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
+		fmt.Printf("[SPOTIFY_METADATA] ERROR: Failed to create request: %v\n", err)
 		return err
 	}
 
 	decodedKey, err := base64.StdEncoding.DecodeString(apiKey)
 	if err != nil {
+		fmt.Printf("[SPOTIFY_METADATA] ERROR: Failed to decode API key: %v\n", err)
 		return fmt.Errorf("failed to decode API key: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 	req.Header.Set("X-API-Key", string(decodedKey))
+
+	fmt.Printf("[SPOTIFY_METADATA] REQUEST: %s %s\n", req.Method, req.URL.String())
+	fmt.Printf("[SPOTIFY_METADATA] Headers: Accept=%s, User-Agent=%s\n", req.Header.Get("Accept"), req.Header.Get("User-Agent"))
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		fmt.Printf("[SPOTIFY_METADATA] ERROR: HTTP request failed: %v\n", err)
 		return err
 	}
 	defer resp.Body.Close()
 
+	fmt.Printf("[SPOTIFY_METADATA] RESPONSE: Status=%d (%s)\n", resp.StatusCode, resp.Status)
+
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+		fmt.Printf("[SPOTIFY_METADATA] ERROR: Non-OK status. Body: %s\n", string(body))
 		return fmt.Errorf("API returned status %d for %s: %s", resp.StatusCode, endpoint, string(body))
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		fmt.Printf("[SPOTIFY_METADATA] ERROR: Failed to read response body: %v\n", err)
 		return err
 	}
+
+	fmt.Printf("[SPOTIFY_METADATA] SUCCESS: Received %d bytes of data\n", len(body))
 
 	return json.Unmarshal(body, dst)
 }
